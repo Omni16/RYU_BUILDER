@@ -42,14 +42,14 @@ jobs:
         run: |
           sudo timedatectl set-timezone UTC
           sudo apt-get update -qq
-          sudo apt-get install -y aria2 \
+          sudo apt-get install -y \
             openjdk-17-jdk-headless \
             openssh-client p7zip-full \
             python3 python-is-python3 python3-pip \
             zip zipalign > /dev/null 2>&1
           sudo pip install --quiet lz4 zstandard \
             google-api-python-client \
-            google-auth-httplib2 gdown \
+            google-auth-httplib2 \
             google-auth-oauthlib > /dev/null 2>&1
           DATE=$(TZ=UTC date +"%y%m%d")
           RYU_NAME="RYUOS_PORT_$DATE"
@@ -58,9 +58,13 @@ jobs:
         run: |
           DEST_DIR="$GITHUB_WORKSPACE/ROM"
           OUT_FILE="$DEST_DIR/${RYU_NAME}.zip"
-          echo "::group::Downloading ROM"
+          echo "::group::Downloading ROM (1DM+ Engine: 32 threads, max 128)"
           mkdir -p "$DEST_DIR"
-          timeout 9000 gdown "$ROM_URL" -O "$OUT_FILE" \
+          timeout 9000 python3 "$GITHUB_WORKSPACE/tools/fast_download.py" \
+            "$ROM_URL" \
+            -o "$OUT_FILE" \
+            --threads 32 \
+            --max-threads 128 \
             || { echo "::error::ROM download failed"; exit 1; }
           echo "::endgroup::"
           [ -s "$OUT_FILE" ] && [ $(stat -c%s "$OUT_FILE") -gt 1048576 ] \

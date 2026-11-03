@@ -46,7 +46,7 @@ jobs:
         run: |
           sudo timedatectl set-timezone UTC
           sudo apt-get update -qq
-          sudo apt-get install -y aria2 \
+          sudo apt-get install -y \
             openjdk-17-jdk-headless \
             openssh-client p7zip-full \
             python3 python-is-python3 python3-pip \
@@ -90,20 +90,19 @@ jobs:
       - name: Download ROM files
         run: |
           DEST_DIR="$GITHUB_WORKSPACE/ROM"
-          echo "::group::Downloading OTA ROM"
+          DEST_FILE="$DEST_DIR/${RYU_NAME}.zip"
+          echo "::group::Downloading OTA ROM (1DM+ Engine: 32 threads, max 128)"
           mkdir -p "$DEST_DIR"
-          timeout 9000 aria2c \
-            -s16 -x16 -j"$(nproc)" -c \
-            -U "Mozilla/5.0" \
-            --console-log-level=warn \
-            -d "$DEST_DIR" \
-            -o "${RYU_NAME}.zip" \
+          timeout 9000 python3 "$GITHUB_WORKSPACE/tools/fast_download.py" \
             "$ROM_URL" \
+            -o "$DEST_FILE" \
+            --threads 32 \
+            --max-threads 128 \
             || { echo "::error::OTA ROM download failed"; exit 1; }
           echo "::endgroup::"
-          [ -s "$DEST_DIR/${RYU_NAME}.zip" ] \
+          [ -s "$DEST_FILE" ] \
             || { echo "::error::Downloaded ROM is missing or empty"; exit 1; }
-          echo "Download complete: $(du -h "$DEST_DIR/${RYU_NAME}.zip" | cut -f1)"
+          echo "Download complete: $(du -h "$DEST_FILE" | cut -f1)"
       - name: Clone RYU AUTO BUILD sources
         run: |
           RYU_HOME="/home/runner/work/RYU_BUILD/RYU_BUILD"

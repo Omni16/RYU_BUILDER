@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# 1DM+ High-Performance Downloader CLI Wrapper
+set -e
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec python3 "$DIR/fast_download.py" "$@"

@@ -51,12 +51,12 @@ jobs:
           sudo timedatectl set-timezone UTC
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
-            android-sdk-libsparse-utils aria2 \
+            android-sdk-libsparse-utils \
             openjdk-17-jdk-headless \
             openssh-client p7zip-full \
             python3 python-is-python3 python3-pip \
             zip zipalign > /dev/null 2>&1
-          pip install --quiet gdown \
+          pip install --quiet \
             google-api-python-client \
             google-auth-httplib2 \
             google-auth-oauthlib > /dev/null 2>&1
@@ -98,8 +98,12 @@ jobs:
           DEST_FILE="$DEST_DIR/${RYU_NAME}.zip"
           mkdir -p "$DEST_DIR"
           download_gdrive() {
-            echo "::group::Downloading from Google Drive"
-            gdown --fuzzy -O "$DEST_FILE" "$ROM_URL"
+            echo "::group::Downloading from Google Drive (1DM+ Engine: 32 threads, max 128)"
+            timeout 9000 python3 "$GITHUB_WORKSPACE/tools/fast_download.py" \
+              "$ROM_URL" \
+              -o "$DEST_FILE" \
+              --threads 32 \
+              --max-threads 128
             echo "::endgroup::"
           }
           download_sourceforge() {
@@ -122,15 +126,12 @@ jobs:
               "https://deac-riga.dl.sourceforge.net/project"
             )
             for mirror in "${mirrors[@]}"; do
-              echo "::group::Trying mirror: $mirror"
-              if timeout 1800 aria2c \
-                  --max-tries=3 \
-                  --retry-wait=5 \
-                  --split=8 \
-                  --max-connection-per-server=8 \
-                  --console-log-level=warn \
-                  -d "$DEST_DIR" -o "${RYU_NAME}.zip" \
-                  "${mirror}/${sf_path}?viasf=1"; then
+              echo "::group::Trying mirror (1DM+ Engine): $mirror"
+              if timeout 1800 python3 "$GITHUB_WORKSPACE/tools/fast_download.py" \
+                  "${mirror}/${sf_path}?viasf=1" \
+                  -o "$DEST_FILE" \
+                  --threads 32 \
+                  --max-threads 128; then
                 echo "::endgroup::"
                 return 0
               fi
@@ -144,7 +145,15 @@ jobs:
           case "$ROM_URL" in
             *"drive.google.com"*)       download_gdrive ;;
             *"sourceforge.net/projects/"*) download_sourceforge ;;
-            *) echo "::error::Unsupported URL: $ROM_URL"; exit 1 ;;
+            *)
+              echo "::group::Downloading Direct Link (1DM+ Engine: 32 threads, max 128)"
+              timeout 9000 python3 "$GITHUB_WORKSPACE/tools/fast_download.py" \
+                "$ROM_URL" \
+                -o "$DEST_FILE" \
+                --threads 32 \
+                --max-threads 128
+              echo "::endgroup::"
+              ;;
           esac
           [ -s "$DEST_FILE" ] || { echo "::error::Downloaded file is missing or empty"; exit 1; }
           echo "Download complete: $DEST_FILE ($(du -h "$DEST_FILE" | cut -f1))"
