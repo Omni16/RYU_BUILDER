@@ -82,7 +82,30 @@ jobs:
           sudo bash "$RYU_HOME/build.sh" "$GITHUB_ENV" "$RYU_NAME"
       - name: Upload ROM to Clouds
         run: |
-          echo "${{ secrets.TOKEN_PICKLE2 }}" | base64 -d > token.pickle
-          echo "${{ secrets.UPLOADER }}" | base64 -d > upload.py
-          chmod 0600 token.pickle upload.py
-          python upload.py --folder-id "1HV_fVyyi7pWsgGBX4B83bTmaCT9X6oex" "$ROM_OUTPUT"
+          # PixelDrain upload function
+          if [ -n "${{ secrets.PIXELDRAIN_API }}" ] && [ -f "$ROM_OUTPUT" ]; then
+            echo "::group::Uploading to PixelDrain..."
+            PD_RESP=$(curl -s -w "\n%{http_code}" -u ":${{ secrets.PIXELDRAIN_API }}" -X PUT -T "$ROM_OUTPUT" "https://pixeldrain.com/api/file/${RYU_NAME}.zip")
+            HTTP_CODE=$(echo "$PD_RESP" | tail -n1)
+            BODY=$(echo "$PD_RESP" | sed '$d')
+            if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+              FILE_ID=$(echo "$BODY" | jq -r '.id // empty')
+              if [ -n "$FILE_ID" ]; then
+                PD_LINK="https://pixeldrain.com/u/${FILE_ID}"
+                echo "PixelDrain Upload Success: $PD_LINK"
+                echo "RYU_LINK=$PD_LINK" >> $GITHUB_ENV
+              fi
+            else
+              echo "::warning::PixelDrain upload failed with HTTP $HTTP_CODE: $BODY"
+            fi
+            echo "::endgroup::"
+          fi
+
+          # Google Drive upload fallback
+          if [ -n "${{ secrets.TOKEN_PICKLE2 }}" ] && [ -n "${{ secrets.UPLOADER }}" ]; then
+            echo "${{ secrets.TOKEN_PICKLE2 }}" | base64 -d > token.pickle
+            echo "${{ secrets.UPLOADER }}" | base64 -d > upload.py
+            chmod 0600 token.pickle upload.py
+            python upload.py --folder-id "1HV_fVyyi7pWsgGBX4B83bTmaCT9X6oex" "$ROM_OUTPUT" || echo "::warning::GDrive upload failed"
+            rm -f token.pickle upload.py
+          fi

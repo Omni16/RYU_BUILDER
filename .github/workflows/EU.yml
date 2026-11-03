@@ -170,30 +170,62 @@ jobs:
       - name: Upload ROM to Clouds
         run: |
           cd "$RYU_HOME/tools"
-          echo "${{ secrets.TOKEN_PICKLE3 }}" | base64 -d > token.pickle
-          echo "${{ secrets.UPLOADER }}" | base64 -d > upload.py
-          echo "${{ secrets.SF_SSH_KEY }}" > key
-          chmod 0600 key token.pickle upload.py
+
+          # PixelDrain upload function
+          pd_upload() {
+            if [ -n "${{ secrets.PIXELDRAIN_API }}" ] && [ -f "$ROM_OUTPUT" ]; then
+              echo "::group::Uploading to PixelDrain..."
+              PD_RESP=$(curl -s -w "\n%{http_code}" -u ":${{ secrets.PIXELDRAIN_API }}" -X PUT -T "$ROM_OUTPUT" "https://pixeldrain.com/api/file/${RYU_NAME}.zip")
+              HTTP_CODE=$(echo "$PD_RESP" | tail -n1)
+              BODY=$(echo "$PD_RESP" | sed '$d')
+              if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+                FILE_ID=$(echo "$BODY" | jq -r '.id // empty')
+                if [ -n "$FILE_ID" ]; then
+                  PD_LINK="https://pixeldrain.com/u/${FILE_ID}"
+                  echo "PixelDrain Upload Success: $PD_LINK"
+                  echo "RYU_LINK=$PD_LINK" >> $GITHUB_ENV
+                  echo "PD_LINK=$PD_LINK" >> $GITHUB_ENV
+                fi
+              else
+                echo "::warning::PixelDrain upload failed with HTTP $HTTP_CODE: $BODY"
+              fi
+              echo "::endgroup::"
+            fi
+          }
+
+          # SourceForge upload function
           sf_upload() {
             local src="$1" dest_path="$2"
-            [ "${{ github.event.inputs.SFU }}" = "true" ] || return 0
-            rsync -a --partial -q \
-              -e "ssh -i key -o StrictHostKeyChecking=no" \
-              "$src" \
-              "zuri1503@frs.sourceforge.net:/home/frs/project/projectzk/ProjectRYU/${dest_path}/" \
-              || { echo "::error::rsync failed: $src -> $dest_path"; exit 1; }
-            echo "Uploaded $(basename "$src") -> SF:$dest_path"
-            echo "RYU_LINK=https://sourceforge.net/projects/projectzk/files/ProjectRYU/$dest_path" >> $GITHUB_ENV
+            if [ "${{ github.event.inputs.SFU }}" = "true" ] && [ -n "${{ secrets.SF_SSH_KEY }}" ]; then
+              echo "${{ secrets.SF_SSH_KEY }}" > key
+              chmod 0600 key
+              rsync -a --partial -q \
+                -e "ssh -i key -o StrictHostKeyChecking=no" \
+                "$src" \
+                "zuri1503@frs.sourceforge.net:/home/frs/project/projectzk/ProjectRYU/${dest_path}/" \
+                && {
+                  echo "Uploaded $(basename "$src") -> SF:$dest_path"
+                  echo "RYU_LINK=https://sourceforge.net/projects/projectzk/files/ProjectRYU/$dest_path" >> $GITHUB_ENV
+                } || echo "::warning::rsync failed: $src -> $dest_path"
+              rm -f key
+            fi
           }
+
+          # Google Drive upload function
           gd_upload() {
             local folder_id="$1"
-            [ "${{ github.event.inputs.SFU }}" = "true" ] || return 0
-           python upload.py --folder-id "$folder_id" "$ROM_OUTPUT" > /dev/null 2>&1 \
-              || { echo "::error::GDrive upload failed (folder: $folder_id)"; exit 1; }
+            if [ -n "${{ secrets.TOKEN_PICKLE3 }}" ] && [ -n "${{ secrets.UPLOADER }}" ]; then
+              echo "${{ secrets.TOKEN_PICKLE3 }}" | base64 -d > token.pickle
+              echo "${{ secrets.UPLOADER }}" | base64 -d > upload.py
+              chmod 0600 token.pickle upload.py
+              python upload.py --folder-id "$folder_id" "$ROM_OUTPUT" || echo "::warning::GDrive upload failed"
+              rm -f token.pickle upload.py
+            fi
           }
-          pd_upload() {
-            curl -u ":${{ secrets.PIXELDRAIN_API }}" -X PUT -T "$ROM_OUTPUT" "https://pixeldrain.com/api/file/${RYU_NAME}.zip" > /dev/null 2>&1
-          }
+
+          # Always upload to PixelDrain when API key is available
+          pd_upload
+
           case "$ROM_VER" in
             V14)
               sf_upload "$ROM_OUTPUT" "RYU-EU/RYUUI14"
@@ -212,19 +244,18 @@ jobs:
               gd_upload "125CzcpuFCY49kmJpp5ICfKKa9P8FhIel"
               ;;
             *)
-              echo "::warning::Unknown ROM_VER=$ROM_VER, skipping upload"
+              echo "::warning::Unknown ROM_VER=$ROM_VER, skipping SF/GD upload"
               ;;
           esac
-          [ "${{ github.event.inputs.SFU }}" = "false" ] && pd_upload
-          rm -rf "$RYU_HOME/tools/key" "$RYU_HOME/tools/token.pickle" "$RYU_HOME/tools/upload.py"
+
       - name: Telegram Notification
-        if: env.RYU_LINK != ''
+        if: env.RYU_LINK != '' && secrets.TELEGRAM_BOT_TOKEN != ''
         run: |
           PAYLOAD=$(jq -n \
             --arg chat "-1002030539146" \
-            --arg text "✅ <b>NEW BUILD: <a href='${RYU_LINK}/${RYU_NAME}.zip'>${RYU_NAME}.zip</a></b>" \
+            --arg text "✅ <b>NEW BUILD: <a href='${RYU_LINK}'>${RYU_NAME}.zip</a></b>" \
             '{ chat_id: $chat, text: $text, parse_mode: "HTML" }')
           curl -s -X POST \
             "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -H "Content-Type: application/json" \
-            -d "$PAYLOAD"
+            -d "$PAYLOAD" || true
