@@ -185,13 +185,16 @@ jobs:
           gd_upload "$GD_FOLDER"
 
       - name: Telegram Notification
-        if: env.RYU_LINK != '' && secrets.TELEGRAM_BOT_TOKEN != ''
+        if: env.RYU_LINK != ''
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
+          [ -n "$TG_BOT_TOKEN" ] || exit 0
           PAYLOAD=$(jq -n \
             --arg chat "-1002030539146" \
             --arg text "✅ <b>NEW BUILD: <a href='${RYU_LINK}'>${RYU_NAME}.zip</a></b>" \
             '{ chat_id: $chat, text: $text, parse_mode: "HTML" }')
           curl -s -X POST \
-            "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD" || true
