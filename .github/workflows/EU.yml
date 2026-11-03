@@ -152,7 +152,7 @@ jobs:
         run: |
           RYU_HOME="/home/runner/work/RYU_BUILD/RYU_BUILD"
           echo "RYU_HOME=$RYU_HOME" >> $GITHUB_ENV
-          git clone -b main --depth=1 git@github.com:zuri1503/RYU_BUILD.git "$RYU_HOME"
+          git clone -b main --depth=1 git@github.com:Omni16/RYU_BUILD.git "$RYU_HOME"
           mv -f "$GITHUB_WORKSPACE/ROM" "$RYU_HOME/ROM"
           sudo chmod -R +x "$RYU_HOME"
       - name: Build ProjectRYU ROM
