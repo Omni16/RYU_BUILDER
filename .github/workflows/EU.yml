@@ -103,9 +103,10 @@ jobs:
           mkdir -p "$DEST_DIR"
           download_gdrive() {
             echo "::group::Downloading from Google Drive (1DM+ Engine: 64 threads, max 128)"
-            timeout 9000 python3 "$GITHUB_WORKSPACE/tools/fast_download.py" \
+            timeout 3600 python3 "$GITHUB_WORKSPACE/tools/fast_download.py" \
               "$ROM_URL" \
               -o "$DEST_FILE" \
+              --connect-timeout 10 \
               --threads 64 \
               --max-threads 128
             echo "::endgroup::"
@@ -130,13 +131,14 @@ jobs:
               "https://deac-riga.dl.sourceforge.net/project"
             )
             echo "::group::Downloading from SourceForge (1DM+ Multi-Mirror Racing: 64 threads, max 128)"
-            timeout 9000 python3 "$GITHUB_WORKSPACE/tools/fast_download.py" \
+            timeout 3600 python3 "$GITHUB_WORKSPACE/tools/fast_download.py" \
               "${mirrors[0]}/${sf_path}?viasf=1" \
               -m "${mirrors[1]}/${sf_path}?viasf=1" \
               -m "${mirrors[2]}/${sf_path}?viasf=1" \
               -m "${mirrors[3]}/${sf_path}?viasf=1" \
               -m "${mirrors[4]}/${sf_path}?viasf=1" \
               -o "$DEST_FILE" \
+              --connect-timeout 10 \
               --threads 64 \
               --max-threads 128 \
               || { echo "::error::SourceForge multi-mirror download failed"; return 1; }
@@ -147,9 +149,10 @@ jobs:
             *"sourceforge.net/projects/"*) download_sourceforge ;;
             *)
               echo "::group::Downloading Direct Link (1DM+ Engine: 64 threads, max 128)"
-              timeout 9000 python3 "$GITHUB_WORKSPACE/tools/fast_download.py" \
+              timeout 3600 python3 "$GITHUB_WORKSPACE/tools/fast_download.py" \
                 "$ROM_URL" \
                 -o "$DEST_FILE" \
+                --connect-timeout 10 \
                 --threads 64 \
                 --max-threads 128
               echo "::endgroup::"

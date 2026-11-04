@@ -167,12 +167,14 @@ class TimeoutHTTPSHandler(urllib.request.HTTPSHandler):
 # =====================================================================
 
 class ConcurrencyController:
-    """Thread-safe adaptive concurrency controller."""
+    """Thread-safe adaptive concurrency controller with AIMD (Additive Increase Multiplicative Decrease)."""
 
     def __init__(self, initial_limit: int):
         self.max_limit = initial_limit
         self.current_limit = initial_limit
         self.active_workers = 0
+        self.consecutive_successes = 0
+        self.cooldown_until = 0.0
         self.lock = threading.Lock()
         self.cv = threading.Condition(self.lock)
 
@@ -189,11 +191,26 @@ class ConcurrencyController:
 
     def reduce_limit(self, factor: float = 0.5) -> int:
         with self.cv:
+            now = time.time()
+            self.cooldown_until = now + 5.0
+            self.consecutive_successes = 0
             new_limit = max(1, int(self.current_limit * factor))
             if new_limit < self.current_limit:
                 self.current_limit = new_limit
                 self.cv.notify_all()
             return self.current_limit
+
+    def record_success(self):
+        """Gradually recover concurrency after a streak of successful chunks without errors."""
+        with self.cv:
+            now = time.time()
+            if now < self.cooldown_until:
+                return
+            self.consecutive_successes += 1
+            if self.consecutive_successes >= 4 and self.current_limit < self.max_limit:
+                self.current_limit += 1
+                self.consecutive_successes = 0
+                self.cv.notify_all()
 
     def get_active(self) -> int:
         with self.cv:
@@ -208,10 +225,12 @@ class MirrorPool:
     """
     Manages multiple download mirrors, evaluates connection latencies,
     and intelligently races workers toward the fastest responding endpoints.
+    Enforces per-mirror connection caps to prevent overloading any single host.
     """
 
-    def __init__(self, urls: List[str]):
+    def __init__(self, urls: List[str], max_conns_per_mirror: int = 16):
         clean_urls = [u.strip() for u in urls if u and is_safe_url(u.strip())]
+        self.max_conns_per_mirror = max(1, max_conns_per_mirror)
         self.mirrors = [
             {"url": u, "latency": 0.0, "failures": 0, "active": 0}
             for u in clean_urls
@@ -219,29 +238,35 @@ class MirrorPool:
         self.lock = threading.Lock()
 
     def get_best(self) -> str:
-        """Select mirror with optimal health score and lowest latency."""
+        """Select mirror with optimal health score and lowest latency within per-mirror limit."""
         with self.lock:
             if not self.mirrors:
                 return ""
-            available = [m for m in self.mirrors if m["failures"] < 5]
+            available = [
+                m for m in self.mirrors
+                if m["failures"] < 5 and m["active"] < self.max_conns_per_mirror
+            ]
             if not available:
-                for m in self.mirrors:
+                # If all under cap hit failure threshold, reset failures
+                available = [m for m in self.mirrors if m["active"] < self.max_conns_per_mirror]
+                if not available:
+                    # If all mirrors are at max connection capacity, pick the least active
+                    available = self.mirrors
+                for m in available:
                     m["failures"] = 0
-                available = self.mirrors
 
             best = min(
                 available,
-                key=lambda m: (m["failures"] * 3.0 + m["latency"] + m["active"] * 0.15),
+                key=lambda m: (m["failures"] * 3.0 + m["latency"] + m["active"] * 0.35),
             )
             best["active"] += 1
             return best["url"]
 
-    def record_result(self, url: str, elapsed: float, success: bool = True):
-        """Record round-trip latency or failure count for a mirror."""
+    def record_latency(self, url: str, elapsed: float, success: bool = True):
+        """Record round-trip latency and failure count for a mirror."""
         with self.lock:
             for m in self.mirrors:
                 if m["url"] == url:
-                    m["active"] = max(0, m["active"] - 1)
                     if success:
                         m["latency"] = (
                             (m["latency"] * 0.7 + elapsed * 0.3)
@@ -252,6 +277,19 @@ class MirrorPool:
                     else:
                         m["failures"] += 1
                     break
+
+    def release_connection(self, url: str):
+        """Decrement active connection count for mirror."""
+        with self.lock:
+            for m in self.mirrors:
+                if m["url"] == url:
+                    m["active"] = max(0, m["active"] - 1)
+                    break
+
+    def record_result(self, url: str, elapsed: float, success: bool = True):
+        """Record round-trip latency and release active connection for backward compatibility."""
+        self.record_latency(url, elapsed, success)
+        self.release_connection(url)
 
 
 # =====================================================================
@@ -364,7 +402,7 @@ class WorkStealer:
     def __init__(self, chunks: List[Dict], min_steal_size: int = MIN_CHUNK_STEAL_SIZE):
         self.chunks = chunks
         self.min_steal_size = min_steal_size
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
 
     def get_or_steal_chunk(self, worker_id: str) -> Optional[Dict]:
         """Fetch next pending chunk or steal from the slowest active chunk."""
@@ -392,6 +430,11 @@ class WorkStealer:
                 old_end = best_chunk["end"]
                 new_chunk_start = old_end - half + 1
 
+                # Ensure new_chunk_start is strictly ahead of original worker's current download position
+                cur_pos = best_chunk["start"] + best_chunk.get("downloaded", 0)
+                if new_chunk_start <= cur_pos:
+                    return None
+
                 # Shrink original chunk's boundary safely
                 best_chunk["end"] = new_chunk_start - 1
 
@@ -412,8 +455,11 @@ class WorkStealer:
     def release_chunk(self, chunk: Dict, done: bool = True):
         with self.lock:
             chunk["active"] = False
-            if done:
+            expected_span = chunk["end"] - chunk["start"] + 1
+            if done and chunk.get("downloaded", 0) >= expected_span:
                 chunk["done"] = True
+            elif not chunk.get("done", False):
+                chunk["done"] = False
 
     def get_all_chunks(self) -> List[Dict]:
         with self.lock:
@@ -462,9 +508,8 @@ class FastDownloader:
                 seen_mirrors.add(m)
                 deduped_mirrors.append(m)
 
-        self.mirror_pool = MirrorPool(deduped_mirrors)
         self.raw_output_path = output_path
-        self.dest_dir = dest_dir or os.getcwd()
+        self.dest_dir = dest_dir or "."
         self.max_threads = max(1, min(MAX_SUPPORTED_THREADS, max_threads))
         self.threads = max(1, min(self.max_threads, threads))
         self.connect_timeout = connect_timeout
@@ -475,6 +520,10 @@ class FastDownloader:
         self.resume = resume
         self.quiet = quiet
         self.chunk_size_mb = chunk_size_mb
+
+        num_mirrors = max(1, len(deduped_mirrors))
+        max_conns_per_mirror = max(4, (self.threads // num_mirrors) + 6)
+        self.mirror_pool = MirrorPool(deduped_mirrors, max_conns_per_mirror=max_conns_per_mirror)
 
         # Networking components
         self.cookie_jar = http.cookiejar.CookieJar()
@@ -849,11 +898,14 @@ class FastDownloader:
                     self._process_chunk(
                         fd,
                         chunk,
+                        work_stealer,
                         tracker,
                         save_state_callback,
                     )
                 finally:
                     work_stealer.release_chunk(chunk, done=chunk.get("done", False))
+                    if chunk.get("done", False):
+                        self.controller.record_success()
                     save_state_callback()
             finally:
                 self.controller.release()
@@ -862,34 +914,42 @@ class FastDownloader:
         self,
         fd: int,
         chunk: Dict,
+        work_stealer: WorkStealer,
         tracker: ProgressTracker,
         save_state_callback,
     ):
         """Download range segments for a single chunk with strict range validation."""
         start_offset = chunk["start"] + chunk["downloaded"]
-        end_offset = chunk["end"]
 
-        if start_offset > end_offset:
-            chunk["done"] = True
-            return
+        with work_stealer.lock:
+            end_offset = chunk["end"]
+            if start_offset > end_offset:
+                chunk["done"] = True
+                return
 
         retries_left = self.retries
         backoff = 1.0
 
-        while start_offset <= chunk["end"] and retries_left > 0:
-            end_offset = chunk["end"]
-            if start_offset > end_offset:
-                break
+        while retries_left > 0:
+            with work_stealer.lock:
+                start_offset = chunk["start"] + chunk["downloaded"]
+                end_offset = chunk["end"]
+                if start_offset > end_offset:
+                    chunk["done"] = True
+                    return
 
             current_mirror = self.mirror_pool.get_best() or self.resolved_url
             headers = {
                 "Range": f"bytes={start_offset}-{end_offset}",
                 "Accept-Encoding": "identity",
             }
-            if self.etag:
-                headers["If-Range"] = self.etag
-            elif self.last_modified:
-                headers["If-Range"] = self.last_modified
+            # Only send If-Range if using the exact primary URL where ETag was probed.
+            # Alternate mirrors often have differing ETags which causes 200 OK full file response.
+            if current_mirror == self.resolved_url:
+                if self.etag:
+                    headers["If-Range"] = self.etag
+                elif self.last_modified:
+                    headers["If-Range"] = self.last_modified
 
             t0 = time.time()
             try:
@@ -897,11 +957,16 @@ class FastDownloader:
                 resp = self._open_url(req)
                 t_connect = time.time() - t0
 
-                # Validate HTTP 206 Partial Content
-                if resp.status != 206:
+                # Validate HTTP 206 Partial Content strictly
+                if resp.status == 200:
                     resp.close()
                     raise urllib.error.HTTPError(
-                        req.full_url, resp.status, "Expected HTTP 206 Partial Content", resp.headers, None
+                        req.full_url, 200, "Server ignored Range request and returned 200 OK (full file)", resp.headers, None
+                    )
+                elif resp.status != 206:
+                    resp.close()
+                    raise urllib.error.HTTPError(
+                        req.full_url, resp.status, f"Expected HTTP 206 Partial Content, got {resp.status}", resp.headers, None
                     )
 
                 # Validate Content-Range header
@@ -927,36 +992,66 @@ class FastDownloader:
                         resp.close()
                         raise IOError(f"Content-Range total size mismatch: expected {self.total_size}, got {cr_total}")
 
-                self.mirror_pool.record_result(current_mirror, t_connect, success=True)
+                self.mirror_pool.record_latency(current_mirror, t_connect, success=True)
 
-                while start_offset <= chunk["end"]:
-                    end_offset = chunk["end"]
-                    to_read = min(BUFFER_SIZE, end_offset - start_offset + 1)
-                    if to_read <= 0:
-                        break
+                while True:
+                    with work_stealer.lock:
+                        current_end = chunk["end"]
+                        if start_offset > current_end:
+                            chunk["done"] = True
+                            break
+                        to_read = min(BUFFER_SIZE, current_end - start_offset + 1)
+                        if to_read <= 0:
+                            chunk["done"] = True
+                            break
 
                     buf = resp.read(to_read)
                     if not buf:
+                        with work_stealer.lock:
+                            current_end = chunk["end"]
+                        if start_offset <= current_end:
+                            raise IOError(
+                                f"Premature EOF on chunk {chunk['id']}: downloaded {chunk['downloaded']} of "
+                                f"{current_end - chunk['start'] + 1} bytes"
+                            )
                         break
 
-                    os.pwrite(fd, buf, start_offset)
-                    n = len(buf)
-                    start_offset += n
-                    chunk["downloaded"] += n
-                    tracker.add_bytes(n)
+                    with work_stealer.lock:
+                        current_end = chunk["end"]
+                        allowed_write = current_end - start_offset + 1
+                        if allowed_write <= 0:
+                            if chunk["downloaded"] >= (current_end - chunk["start"] + 1):
+                                chunk["done"] = True
+                            break
+
+                        write_len = min(len(buf), allowed_write)
+                        os.pwrite(fd, buf[:write_len], start_offset)
+                        start_offset += write_len
+                        chunk["downloaded"] += write_len
+                        tracker.add_bytes(write_len)
+
+                        if start_offset > current_end and chunk["downloaded"] >= (current_end - chunk["start"] + 1):
+                            chunk["done"] = True
+                            break
 
                 resp.close()
 
-                if start_offset > chunk["end"]:
-                    chunk["done"] = True
+                is_done = False
+                with work_stealer.lock:
+                    expected_span = chunk["end"] - chunk["start"] + 1
+                    if start_offset > chunk["end"] and chunk["downloaded"] >= expected_span:
+                        chunk["done"] = True
+                        is_done = True
+                if is_done:
                     save_state_callback()
                     return
 
             except urllib.error.HTTPError as e:
-                self.mirror_pool.record_result(current_mirror, time.time() - t0, success=False)
+                self.mirror_pool.record_latency(current_mirror, time.time() - t0, success=False)
                 if e.code == 416:
                     if start_offset >= self.total_size:
-                        chunk["done"] = True
+                        with work_stealer.lock:
+                            chunk["done"] = True
                         save_state_callback()
                         return
                     req_head = self._build_request(
@@ -981,7 +1076,7 @@ class FastDownloader:
                 backoff = min(16.0, backoff * 1.5)
 
             except (socket.timeout, urllib.error.URLError, http.client.HTTPException, OSError) as e:
-                self.mirror_pool.record_result(current_mirror, time.time() - t0, success=False)
+                self.mirror_pool.record_latency(current_mirror, time.time() - t0, success=False)
                 retries_left -= 1
                 if retries_left <= 0:
                     raise RuntimeError(
@@ -989,6 +1084,9 @@ class FastDownloader:
                     )
                 time.sleep(backoff)
                 backoff = min(16.0, backoff * 1.5)
+
+            finally:
+                self.mirror_pool.release_connection(current_mirror)
 
     def _download_fallback_stream(self, tracker: ProgressTracker):
         """Fallback to single identity stream when range requests are unsupported."""
@@ -1083,6 +1181,17 @@ class FastDownloader:
 
             # Verification and atomic finalization
             if self.total_size > 0:
+                all_chunks = work_stealer.get_all_chunks()
+                incomplete = [c for c in all_chunks if not c.get("done", False)]
+                if incomplete:
+                    raise IOError(
+                        f"Download incomplete: {len(incomplete)} chunk(s) not finished"
+                    )
+                total_dl = sum(c.get("downloaded", 0) for c in all_chunks)
+                if total_dl != self.total_size:
+                    raise IOError(
+                        f"Byte coverage mismatch: chunks total {total_dl} bytes, expected {self.total_size} bytes"
+                    )
                 actual_size = os.path.getsize(self.tmp_file_path)
                 if actual_size != self.total_size:
                     raise IOError(

@@ -97,9 +97,10 @@ jobs:
           DEST_FILE="$DEST_DIR/${RYU_NAME}.zip"
           echo "::group::Downloading OTA ROM (1DM+ Engine: 64 threads, max 128)"
           mkdir -p "$DEST_DIR"
-          timeout 9000 python3 "$GITHUB_WORKSPACE/tools/fast_download.py" \
+          timeout 3600 python3 "$GITHUB_WORKSPACE/tools/fast_download.py" \
             "$ROM_URL" \
             -o "$DEST_FILE" \
+            --connect-timeout 10 \
             --threads 64 \
             --max-threads 128 \
             || { echo "::error::OTA ROM download failed"; exit 1; }
