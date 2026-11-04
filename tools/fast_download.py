@@ -399,9 +399,10 @@ class WorkStealer:
     atomically bisect its remaining byte range, and take over the second half.
     """
 
-    def __init__(self, chunks: List[Dict], min_steal_size: int = MIN_CHUNK_STEAL_SIZE):
+    def __init__(self, chunks: List[Dict], min_steal_size: int = MIN_CHUNK_STEAL_SIZE, quiet: bool = False):
         self.chunks = chunks
         self.min_steal_size = min_steal_size
+        self.quiet = quiet
         self.lock = threading.RLock()
 
     def get_or_steal_chunk(self, worker_id: str) -> Optional[Dict]:
@@ -448,6 +449,13 @@ class WorkStealer:
                     "worker_id": worker_id,
                 }
                 self.chunks.append(stolen_chunk)
+                if not self.quiet:
+                    print(
+                        f"\n[1DM+ Steal] {worker_id} bisected Chunk {best_chunk['id']}: "
+                        f"took [{new_chunk_start}-{old_end}] ({format_bytes(half)}), "
+                        f"Chunk {best_chunk['id']} new range [{best_chunk['start']}-{best_chunk['end']}]",
+                        flush=True,
+                    )
                 return stolen_chunk
 
             return None
@@ -855,6 +863,17 @@ class FastDownloader:
                         sc["active"] = False
                     initial_bytes = sum(c.get("downloaded", 0) for c in saved_chunks)
                     return saved_chunks, initial_bytes
+                else:
+                    if not self.quiet:
+                        print(
+                            f"\n[1DM+] Stale resume state detected (ETag or file size changed on primary mirror). "
+                            f"Restarting clean download...",
+                            flush=True,
+                        )
+                    try:
+                        os.unlink(self.state_file_path)
+                    except OSError:
+                        pass
             except Exception:
                 pass
 
@@ -989,11 +1008,17 @@ class FastDownloader:
                 if cr_end > end_offset:
                     resp.close()
                     raise IOError(f"Content-Range end {cr_end} exceeds requested end {end_offset}")
-                if m.group(3) != "*" and self.total_size > 0:
+                if self.total_size > 0:
+                    if m.group(3) == "*":
+                        resp.close()
+                        raise IOError(f"Mirror {current_mirror} returned indeterminate total size ('*') in Content-Range")
                     cr_total = int(m.group(3))
                     if cr_total != self.total_size:
                         resp.close()
-                        raise IOError(f"Content-Range total size mismatch: expected {self.total_size}, got {cr_total}")
+                        raise IOError(
+                            f"Cross-mirror file divergence detected! Mirror {current_mirror} declares total size {cr_total}, "
+                            f"expected {self.total_size} from primary mirror"
+                        )
 
                 self.mirror_pool.record_latency(current_mirror, t_connect, success=True)
 
@@ -1162,7 +1187,7 @@ class FastDownloader:
 
                 fd = os.open(self.tmp_file_path, os.O_RDWR)
                 state_lock = threading.Lock()
-                work_stealer = WorkStealer(chunks, min_steal_size=MIN_CHUNK_STEAL_SIZE)
+                work_stealer = WorkStealer(chunks, min_steal_size=MIN_CHUNK_STEAL_SIZE, quiet=self.quiet)
 
                 def save_state_locked():
                     with state_lock:
