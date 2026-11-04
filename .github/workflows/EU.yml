@@ -129,22 +129,18 @@ jobs:
               "https://netcologne.dl.sourceforge.net/project"
               "https://deac-riga.dl.sourceforge.net/project"
             )
-            for mirror in "${mirrors[@]}"; do
-              echo "::group::Trying mirror (1DM+ Engine): $mirror"
-              if timeout 1800 python3 "$GITHUB_WORKSPACE/tools/fast_download.py" \
-                  "${mirror}/${sf_path}?viasf=1" \
-                  -o "$DEST_FILE" \
-                  --threads 64 \
-                  --max-threads 128; then
-                echo "::endgroup::"
-                return 0
-              fi
-              echo "Mirror failed, trying next..."
-              echo "::endgroup::"
-              rm -f "$DEST_FILE"
-            done
-            echo "::error::All SourceForge mirrors failed"
-            return 1
+            echo "::group::Downloading from SourceForge (1DM+ Multi-Mirror Racing: 64 threads, max 128)"
+            timeout 9000 python3 "$GITHUB_WORKSPACE/tools/fast_download.py" \
+              "${mirrors[0]}/${sf_path}?viasf=1" \
+              -m "${mirrors[1]}/${sf_path}?viasf=1" \
+              -m "${mirrors[2]}/${sf_path}?viasf=1" \
+              -m "${mirrors[3]}/${sf_path}?viasf=1" \
+              -m "${mirrors[4]}/${sf_path}?viasf=1" \
+              -o "$DEST_FILE" \
+              --threads 64 \
+              --max-threads 128 \
+              || { echo "::error::SourceForge multi-mirror download failed"; return 1; }
+            echo "::endgroup::"
           }
           case "$ROM_URL" in
             *"drive.google.com"*)       download_gdrive ;;
