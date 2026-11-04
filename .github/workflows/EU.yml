@@ -44,8 +44,19 @@ jobs:
           echo "${{ secrets.PRIVATE_REPO_KEY }}" | base64 -d > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           eval "$(ssh-agent -s)"
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> $GITHUB_ENV
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> $GITHUB_ENV
           ssh-add ~/.ssh/id_ed25519
-          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts
+          cat << 'EOF' > ~/.ssh/config
+          Host github.com
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/id_ed25519
+            IdentitiesOnly yes
+            StrictHostKeyChecking accept-new
+          EOF
+          chmod 600 ~/.ssh/config
       - name: Setup build environment
         run: |
           sudo timedatectl set-timezone UTC
@@ -161,6 +172,8 @@ jobs:
           [ -s "$DEST_FILE" ] || { echo "::error::Downloaded file is missing or empty"; exit 1; }
           echo "Download complete: $DEST_FILE ($(du -h "$DEST_FILE" | cut -f1))"
       - name: Clone RYU BUILD sources
+        env:
+          GIT_SSH_COMMAND: "ssh -i /home/runner/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
         run: |
           RYU_HOME="/home/runner/work/RYU_BUILD/RYU_BUILD"
           echo "RYU_HOME=$RYU_HOME" >> $GITHUB_ENV
