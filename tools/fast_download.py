@@ -986,6 +986,9 @@ class FastDownloader:
                 if cr_end < cr_start:
                     resp.close()
                     raise IOError(f"Content-Range end {cr_end} is before start {cr_start}")
+                if cr_end > end_offset:
+                    resp.close()
+                    raise IOError(f"Content-Range end {cr_end} exceeds requested end {end_offset}")
                 if m.group(3) != "*" and self.total_size > 0:
                     cr_total = int(m.group(3))
                     if cr_total != self.total_size:
@@ -997,30 +1000,33 @@ class FastDownloader:
                 while True:
                     with work_stealer.lock:
                         current_end = chunk["end"]
-                        if start_offset > current_end:
-                            chunk["done"] = True
+                        stream_limit = min(current_end, cr_end)
+                        if start_offset > stream_limit:
+                            if start_offset > current_end and chunk["downloaded"] >= (current_end - chunk["start"] + 1):
+                                chunk["done"] = True
                             break
-                        to_read = min(BUFFER_SIZE, current_end - start_offset + 1)
+                        to_read = min(BUFFER_SIZE, stream_limit - start_offset + 1)
                         if to_read <= 0:
-                            chunk["done"] = True
                             break
 
                     buf = resp.read(to_read)
                     if not buf:
                         with work_stealer.lock:
                             current_end = chunk["end"]
-                        if start_offset <= current_end:
+                            stream_limit = min(current_end, cr_end)
+                        if start_offset <= stream_limit:
                             raise IOError(
-                                f"Premature EOF on chunk {chunk['id']}: downloaded {chunk['downloaded']} of "
-                                f"{current_end - chunk['start'] + 1} bytes"
+                                f"Premature EOF on chunk {chunk['id']}: downloaded {start_offset} of "
+                                f"{stream_limit + 1} bytes in current range"
                             )
                         break
 
                     with work_stealer.lock:
                         current_end = chunk["end"]
-                        allowed_write = current_end - start_offset + 1
+                        stream_limit = min(current_end, cr_end)
+                        allowed_write = stream_limit - start_offset + 1
                         if allowed_write <= 0:
-                            if chunk["downloaded"] >= (current_end - chunk["start"] + 1):
+                            if start_offset > current_end and chunk["downloaded"] >= (current_end - chunk["start"] + 1):
                                 chunk["done"] = True
                             break
 
@@ -1032,6 +1038,8 @@ class FastDownloader:
 
                         if start_offset > current_end and chunk["downloaded"] >= (current_end - chunk["start"] + 1):
                             chunk["done"] = True
+                            break
+                        if start_offset > cr_end:
                             break
 
                 resp.close()
