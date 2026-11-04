@@ -62,12 +62,12 @@ jobs:
         run: |
           DEST_DIR="$GITHUB_WORKSPACE/ROM"
           OUT_FILE="$DEST_DIR/${RYU_NAME}.zip"
-          echo "::group::Downloading ROM (1DM+ Engine: 32 threads, max 128)"
+          echo "::group::Downloading ROM (1DM+ Engine: 64 threads, max 128)"
           mkdir -p "$DEST_DIR"
           timeout 9000 python3 "$GITHUB_WORKSPACE/tools/fast_download.py" \
             "$ROM_URL" \
             -o "$OUT_FILE" \
-            --threads 32 \
+            --threads 64 \
             --max-threads 128 \
             || { echo "::error::ROM download failed"; exit 1; }
           echo "::endgroup::"

@@ -4,7 +4,7 @@
 Reverse-engineered architecture from 1DM+ (Download Manager Plus)
 Features:
   - Multi-connection HTTP range download with chunk partitioning
-  - Concurrency: default 32 threads, configurable up to 128 threads
+  - Concurrency: default 64 threads, configurable up to 128 threads
   - Range probing (bytes=0- vs 206 Partial Content), fallback to identity stream
   - Pre-allocation (sparse / posix_fallocate) to eliminate disk fragmentation
   - Chunk-level retry, socket resilience, session cookies, redirects follow (up to 20)
@@ -34,7 +34,7 @@ import urllib.request
 from typing import Dict, List, Optional, Tuple
 
 # Configuration Constants
-DEFAULT_THREADS = 32
+DEFAULT_THREADS = 64
 MAX_SUPPORTED_THREADS = 128
 BUFFER_SIZE = 256 * 1024  # 256 KB matching 1DM+ chunk buffer size
 DEFAULT_TIMEOUT = 30      # Socket connect & read timeout in seconds
@@ -736,7 +736,7 @@ def main():
         "-s", "-x", "-j", "-n", "--threads", "--concurrency",
         type=int,
         default=int(os.environ.get("DOWNLOAD_THREADS", DEFAULT_THREADS)),
-        help="Number of concurrent download connections (default: 32, max: 128)",
+        help="Number of concurrent download connections (default: 64, max: 128)",
     )
     parser.add_argument(
         "--max-threads",
