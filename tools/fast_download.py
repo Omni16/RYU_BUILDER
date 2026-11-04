@@ -74,13 +74,15 @@ def format_time(seconds: float) -> str:
 
 
 def is_safe_url(url: str) -> bool:
-    """Validate URL scheme and ensure host is well-formed."""
+    """Validate URL scheme and ensure host is well-formed without embedded credentials."""
     try:
         parsed = urllib.parse.urlparse(url)
         if parsed.scheme.lower() not in ("http", "https"):
             return False
         hostname = parsed.hostname
         if not hostname:
+            return False
+        if parsed.username or parsed.password:
             return False
         return True
     except Exception:
@@ -697,7 +699,11 @@ class FastDownloader:
                 loc = headers.get("Location")
                 if not loc:
                     break
-                current_url = urllib.parse.urljoin(current_url, loc)
+                next_url = urllib.parse.urljoin(current_url, loc)
+                if not is_safe_url(next_url):
+                    resp.close()
+                    raise ValueError(f"Insecure or invalid redirect destination: {next_url}")
+                current_url = next_url
                 redirects += 1
                 resp.close()
                 continue
@@ -899,18 +905,27 @@ class FastDownloader:
                     )
 
                 # Validate Content-Range header
-                cr = resp.headers.get("Content-Range", "")
+                cr = resp.headers.get("Content-Range")
+                if not cr:
+                    resp.close()
+                    raise IOError(f"Missing Content-Range header from mirror {current_mirror}")
                 m = re.search(r"bytes\s+(\d+)-(\d+)/(\d+|\*)", cr)
-                if m:
-                    cr_start = int(m.group(1))
-                    if cr_start != start_offset:
+                if not m:
+                    resp.close()
+                    raise IOError(f"Malformed Content-Range '{cr}' from mirror {current_mirror}")
+
+                cr_start, cr_end = int(m.group(1)), int(m.group(2))
+                if cr_start != start_offset:
+                    resp.close()
+                    raise IOError(f"Content-Range start mismatch: expected {start_offset}, got {cr_start}")
+                if cr_end < cr_start:
+                    resp.close()
+                    raise IOError(f"Content-Range end {cr_end} is before start {cr_start}")
+                if m.group(3) != "*" and self.total_size > 0:
+                    cr_total = int(m.group(3))
+                    if cr_total != self.total_size:
                         resp.close()
-                        raise IOError(f"Content-Range start mismatch: expected {start_offset}, got {cr_start}")
-                    if m.group(3) != "*" and self.total_size > 0:
-                        cr_total = int(m.group(3))
-                        if cr_total != self.total_size:
-                            resp.close()
-                            raise IOError(f"Content-Range total size mismatch: expected {self.total_size}, got {cr_total}")
+                        raise IOError(f"Content-Range total size mismatch: expected {self.total_size}, got {cr_total}")
 
                 self.mirror_pool.record_result(current_mirror, t_connect, success=True)
 
